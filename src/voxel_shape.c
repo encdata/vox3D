@@ -507,3 +507,125 @@ void b3VoxelShape_AddCells( b3ShapeId shapeId, const b3Vec3i* cells, const uint1
 	B3_UNUSED( geomIndices );
 	B3_UNUSED( count );
 }
+
+void b3Voxel_ApplyAerodynamics( const b3VoxelData* v, b3Transform transform, b3Vec3 localCenterOfMass,
+								b3Vec3 linearVelocity, b3Vec3 angularVelocity, b3Vec3 wind, float drag,
+								float lift, float maxSpeed, float airDensity, b3Vec3* outForce, b3Vec3* outTorque )
+{
+	if ( v == NULL || v->cellCount == 0 )
+	{
+		return;
+	}
+
+	static const b3Vec3i kFaceOffsets[6] = {
+		{ 1, 0, 0 },  // +X
+		{ -1, 0, 0 }, // -X
+		{ 0, 1, 0 },  // +Y
+		{ 0, -1, 0 }, // -Y
+		{ 0, 0, 1 },  // +Z
+		{ 0, 0, -1 }  // -Z
+	};
+
+	static const b3Vec3 kFaceNormals[6] = {
+		{ 1.0f, 0.0f, 0.0f },
+		{ -1.0f, 0.0f, 0.0f },
+		{ 0.0f, 1.0f, 0.0f },
+		{ 0.0f, -1.0f, 0.0f },
+		{ 0.0f, 0.0f, 1.0f },
+		{ 0.0f, 0.0f, -1.0f }
+	};
+
+	b3Matrix3 matrix = b3MakeMatrixFromQuat( transform.q );
+	float s = v->voxelSize;
+	float faceArea = s * s;
+	b3Vec3 totalForce = { 0 };
+	b3Vec3 totalTorque = { 0 };
+
+	for ( int slot = 0; slot < v->slotCap; ++slot )
+	{
+		if ( v->slots[slot].key == 0 )
+		{
+			continue;
+		}
+
+		b3Vec3i cp = b3Voxel_unpackChunk( v->slots[slot].key );
+		const b3VoxelChunk* chunk = v->chunks + v->slots[slot].index;
+		int base[3] = { cp.x << B3_VOXEL_CHUNK_BITS, cp.y << B3_VOXEL_CHUNK_BITS, cp.z << B3_VOXEL_CHUNK_BITS };
+
+		for ( int k = 0; k < chunk->occupiedCount; ++k )
+		{
+			b3Vec3i lc = chunk->occupied[k];
+			b3Vec3i g = { base[0] + lc.x, base[1] + lc.y, base[2] + lc.z };
+
+			for ( int f = 0; f < 6; ++f )
+			{
+				int nlx = lc.x + kFaceOffsets[f].x;
+				int nly = lc.y + kFaceOffsets[f].y;
+				int nlz = lc.z + kFaceOffsets[f].z;
+				bool isNeighborSolid;
+
+				if ( (unsigned)nlx < B3_VOXEL_CHUNK_SIZE && (unsigned)nly < B3_VOXEL_CHUNK_SIZE &&
+					 (unsigned)nlz < B3_VOXEL_CHUNK_SIZE )
+				{
+					isNeighborSolid = ( chunk->solid[( nlx << 8 ) | ( nly << 4 ) | nlz] != 0 );
+				}
+				else
+				{
+					b3Vec3i neighborCell = { g.x + kFaceOffsets[f].x, g.y + kFaceOffsets[f].y,
+											 g.z + kFaceOffsets[f].z };
+					isNeighborSolid = b3VoxelData_IsSolid( v, neighborCell );
+				}
+
+				if ( isNeighborSolid )
+				{
+					continue;
+				}
+
+				// Face center in local coordinates
+				b3Vec3 fn = kFaceNormals[f];
+				b3Vec3 localFaceCenter = {
+					( (float)g.x + 0.5f * fn.x ) * s,
+					( (float)g.y + 0.5f * fn.y ) * s,
+					( (float)g.z + 0.5f * fn.z ) * s,
+				};
+
+				b3Vec3 normal = b3MulMV( matrix, fn );
+				b3Vec3 lever = b3MulMV( matrix, b3Sub( localFaceCenter, localCenterOfMass ) );
+				b3Vec3 centerVelocity = b3Add( linearVelocity, b3Cross( angularVelocity, lever ) );
+				b3Vec3 relativeVelocity = b3Sub( wind, centerVelocity );
+
+				float speed;
+				b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
+				float cosTheta = -b3Dot( normal, direction );
+
+				if ( cosTheta > FLT_EPSILON )
+				{
+					b3Vec3 liftDir = b3Sub( b3MulSV( -1.0f, normal ), b3MulSV( cosTheta, direction ) );
+					float liftDirLen = b3Length( liftDir );
+					if ( liftDirLen > FLT_EPSILON )
+					{
+						liftDir = b3MulSV( 1.0f / liftDirLen, liftDir );
+					}
+
+					speed = b3MinFloat( speed, maxSpeed );
+
+					float qA = 0.5f * airDensity * faceArea * speed * speed;
+					float sinTheta = liftDirLen;
+					float cl = 2.0f * cosTheta * sinTheta;
+					float cd = 1.28f * cosTheta * cosTheta + 0.02f;
+
+					b3Vec3 dragForce = b3MulSV( qA * drag * cd, direction );
+					b3Vec3 liftForce = b3MulSV( qA * lift * cl, liftDir );
+					b3Vec3 deltaForce = b3Add( dragForce, liftForce );
+					b3Vec3 deltaTorque = b3Cross( lever, deltaForce );
+
+					totalForce = b3Add( totalForce, deltaForce );
+					totalTorque = b3Add( totalTorque, deltaTorque );
+				}
+			}
+		}
+	}
+
+	*outForce = b3Add( *outForce, totalForce );
+	*outTorque = b3Add( *outTorque, totalTorque );
+}

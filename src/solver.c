@@ -65,14 +65,11 @@ typedef struct b3WorkerContext
 } b3WorkerContext;
 
 // Integrate velocities, apply damping, and gyroscopic torque
-static void b3IntegrateVelocitiesTask( b3SolverBlock block, b3StepContext* context )
+static void b3IntegrateVelocitiesTask( b3SolverBlock block, b3StepContext* context, int workerIndex )
 {
-	b3TracyCZoneNC( integrate_velocity, "IntVel", b3_colorDeepPink, true );
-
-	B3_VALIDATE( block.startIndex + block.count <= context->world->solverSets.data[b3_awakeSet].bodyStates.count );
-
 	b3BodyState* states = context->states;
 	b3BodySim* sims = context->sims;
+	b3TaskContext* taskContext = context->world->taskContexts.data + workerIndex;
 
 	b3Vec3 gravity = context->world->gravity;
 	float h = context->h;
@@ -81,6 +78,53 @@ static void b3IntegrateVelocitiesTask( b3SolverBlock block, b3StepContext* conte
 	{
 		b3BodySim* sim = sims + i;
 		b3BodyState* state = states + i;
+
+		b3Vec3 baseForce = sim->force;
+		b3Vec3 baseTorque = sim->torque;
+
+		if ( sim->invMass > 0.0f )
+		{
+			b3Body* body = context->world->bodies.data + sim->bodyId;
+			int shapeId = body->headShapeId;
+			while ( shapeId != B3_NULL_INDEX )
+			{
+				b3Shape* shape = context->world->shapes.data + shapeId;
+				if ( shape->flags & b3_enableLift )
+				{
+					uint64_t t0 = b3GetTicks();
+					b3ApplyShapeAerodynamics( context->world, shape, body, sim, state, context->world->wind, 1.0f,
+											   1.0f, context->maxLinearVelocity );
+					taskContext->aeroTicks += b3GetTicks() - t0;
+				}
+				shapeId = shape->nextShapeId;
+			}
+
+			// Aerodynamic stability impulse limiters (prevents explicit numerical damping overshoots/explosions)
+			b3Vec3 aeroForce = b3Sub( sim->force, baseForce );
+			b3Vec3 aeroTorque = b3Sub( sim->torque, baseTorque );
+
+			b3Vec3 relAirVel = b3Sub( context->world->wind, state->linearVelocity );
+			float relSpeed = b3Length( relAirVel );
+			float maxDeltaV = b3MaxFloat( 35.0f, 1.5f * relSpeed + 10.0f );
+			b3Vec3 linDelta = b3MulSV( h * sim->invMass, aeroForce );
+			float linDeltaLen = b3Length( linDelta );
+			if ( linDeltaLen > maxDeltaV )
+			{
+				aeroForce = b3MulSV( maxDeltaV / linDeltaLen, aeroForce );
+			}
+
+			float omegaLen = b3Length( state->angularVelocity );
+			float maxDeltaW = b3MaxFloat( 25.0f, 1.2f * omegaLen + 15.0f );
+			b3Vec3 angDelta = b3MulSV( h, b3MulMV( sim->invInertiaWorld, aeroTorque ) );
+			float angDeltaLen = b3Length( angDelta );
+			if ( angDeltaLen > maxDeltaW )
+			{
+				aeroTorque = b3MulSV( maxDeltaW / angDeltaLen, aeroTorque );
+			}
+
+			sim->force = b3Add( baseForce, aeroForce );
+			sim->torque = b3Add( baseTorque, aeroTorque );
+		}
 
 		b3Vec3 v = state->linearVelocity;
 		b3Vec3 w = state->angularVelocity;
@@ -103,6 +147,10 @@ static void b3IntegrateVelocitiesTask( b3SolverBlock block, b3StepContext* conte
 
 		b3Vec3 angularVelocityDelta = b3MulSV( h, b3MulMV( sim->invInertiaWorld, sim->torque ) );
 		w = b3MulAdd( angularVelocityDelta, angularDamping, w );
+
+		// Restore base user-applied force/torque so multiple sub-steps don't multiply-accumulate aero forces
+		sim->force = baseForce;
+		sim->torque = baseTorque;
 
 		// Gyroscopic torque by solving this nonlinear equation using Newton-Raphson.
 		// I * (w2 - w1) + h * cross(w2, I * w2) = 0
@@ -817,7 +865,24 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 		sim->flags &= ~b3_bodyTransientFlags;
 		state->flags &= ~b3_bodyTransientFlags;
 
-		if ( enableSleep == false || ( body->flags & b3_enableSleep ) == 0 || sleepVelocity > body->sleepThreshold )
+		bool hasActiveWindLift = false;
+		if ( b3LengthSquared( world->wind ) > 1e-4f )
+		{
+			int shapeId = body->headShapeId;
+			while ( shapeId != B3_NULL_INDEX )
+			{
+				b3Shape* shape = world->shapes.data + shapeId;
+				if ( shape->flags & b3_enableLift )
+				{
+					hasActiveWindLift = true;
+					break;
+				}
+				shapeId = shape->nextShapeId;
+			}
+		}
+
+		if ( enableSleep == false || ( body->flags & b3_enableSleep ) == 0 || sleepVelocity > body->sleepThreshold ||
+			 hasActiveWindLift )
 		{
 			// Body is not sleepy
 			body->sleepTime = 0.0f;
@@ -1048,7 +1113,7 @@ static void b3ExecuteBlock( b3SolverStage* stage, b3StepContext* context, b3Solv
 			break;
 
 		case b3_stageIntegrateVelocities:
-			b3IntegrateVelocitiesTask( block, context );
+			b3IntegrateVelocitiesTask( block, context, workerIndex );
 			break;
 
 		case b3_stageWarmStart:
@@ -1889,6 +1954,7 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 			b3SetBitCountAndClear( &taskContext->jointStateBitSet, jointIdCapacity );
 			b3SetBitCountAndClear( &taskContext->hitEventBitSet, contactIdCapacity );
 			taskContext->hasHitEvents = false;
+			taskContext->aeroTicks = 0;
 
 			workerContext[i].context = stepContext;
 			workerContext[i].workerIndex = i;
@@ -1934,9 +2000,14 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 			world->finishTaskFcn( splitIslandTask, world->userTaskContext );
 			world->activeTaskCount -= 1;
 		}
-		world->splitIslandId = B3_NULL_INDEX;
-
 		world->profile.constraints = b3GetMillisecondsAndReset( &constraintTicks );
+		uint64_t totalAeroTicks = 0;
+		for ( int i = 0; i < workerCount; ++i )
+		{
+			totalAeroTicks += world->taskContexts.data[i].aeroTicks;
+		}
+		uint64_t nowTicks = b3GetTicks();
+		world->profile.aerodynamics = totalAeroTicks > 0 ? b3GetMilliseconds( nowTicks - totalAeroTicks ) : 0.0f;
 		b3TracyCZoneEnd( solve_constraints );
 
 		b3TracyCZoneNC( update_transforms, "Update Transforms", b3_colorMediumSeaGreen, true );

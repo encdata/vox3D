@@ -484,6 +484,21 @@ b3ShapeDef b3RecR_SHAPEDEF( b3RecReader* rdr )
 	def.invokeContactCreation = b3RecR_BOOL( rdr );
 	def.updateBodyMass = b3RecR_BOOL( rdr );
 	def.enableSpeculativeContact = b3RecR_BOOL( rdr );
+	def.enableLift = b3RecR_BOOL( rdr );
+	def.airfoil.type = (b3AirfoilType)b3RecR_I32( rdr );
+	def.airfoil.chordAxis = b3RecR_VEC3( rdr );
+	def.airfoil.upAxis = b3RecR_VEC3( rdr );
+	def.airfoil.centerOfPressure = b3RecR_VEC3( rdr );
+	def.airfoil.area = b3RecR_F32( rdr );
+	def.airfoil.aspectRatio = b3RecR_F32( rdr );
+	def.airfoil.liftSlope = b3RecR_F32( rdr );
+	def.airfoil.zeroLiftAoA = b3RecR_F32( rdr );
+	def.airfoil.stallAngle = b3RecR_F32( rdr );
+	def.airfoil.maxCl = b3RecR_F32( rdr );
+	def.airfoil.cd0 = b3RecR_F32( rdr );
+	def.airfoil.efficiencyFactor = b3RecR_F32( rdr );
+	(void)b3RecR_U64( rdr );
+	def.airfoil.aeroHull = NULL;
 	def.userData = NULL;
 	return def;
 }

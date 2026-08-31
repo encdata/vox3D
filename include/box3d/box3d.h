@@ -172,6 +172,13 @@ B3_API void b3World_SetGravity( b3WorldId worldId, b3Vec3 gravity );
 /// Get the gravity vector
 B3_API b3Vec3 b3World_GetGravity( b3WorldId worldId );
 
+/// Set the ambient wind vector for the entire world.
+/// @see b3WorldDef
+B3_API void b3World_SetWind( b3WorldId worldId, b3Vec3 wind );
+
+/// Get the ambient wind vector
+B3_API b3Vec3 b3World_GetWind( b3WorldId worldId );
+
 /// Apply a radial explosion
 /// @param worldId The world id
 /// @param explosionDef The explosion definition
@@ -1015,6 +1022,58 @@ B3_API b3Vec3 b3Shape_GetClosestPoint( b3ShapeId shapeId, b3Vec3 target );
 /// @param maxSpeed the maximum relative speed. Speed cap is necessary for stability. Typically 10m/s or less.
 /// @param wake should this wake the body
 B3_API void b3Shape_ApplyWind( b3ShapeId shapeId, b3Vec3 wind, float drag, float lift, float maxSpeed, bool wake );
+
+/// Enable or disable shape-based aerodynamic lift and drag for this shape during simulation steps.
+/// @param shapeId the shape id
+/// @param enableLift true to enable aerodynamic simulation on this shape
+B3_API void b3Shape_EnableLift( b3ShapeId shapeId, bool enableLift );
+
+/// Returns whether shape-based aerodynamic lift and drag is enabled for this shape.
+B3_API bool b3Shape_IsLiftEnabled( b3ShapeId shapeId );
+
+/// Get default airfoil definition.
+/// @ingroup shape
+B3_API b3Airfoil b3DefaultAirfoil( void );
+
+/// Create a high-lift cambered airfoil profile (e.g. Clark-Y / NACA 2412).
+/// @param chordAxis direction from trailing edge to leading edge in local shape space
+/// @param upAxis direction perpendicular to chord in lift direction in local shape space
+/// @param area planform area in m^2 (or <= 0 for auto-computation from shape bounds)
+/// @param aspectRatio wing aspect ratio (span^2 / area, e.g. 6.0 to 12.0)
+/// @ingroup shape
+B3_API b3Airfoil b3MakeCamberedAirfoil( b3Vec3 chordAxis, b3Vec3 upAxis, float area, float aspectRatio );
+
+/// Create a symmetric streamlined airfoil profile (e.g. NACA 0012).
+/// @param chordAxis direction from trailing edge to leading edge in local shape space
+/// @param upAxis direction perpendicular to chord in lift direction in local shape space
+/// @param area planform area in m^2 (or <= 0 for auto-computation from shape bounds)
+/// @param aspectRatio wing aspect ratio (span^2 / area, e.g. 6.0 to 12.0)
+/// @ingroup shape
+B3_API b3Airfoil b3MakeSymmetricAirfoil( b3Vec3 chordAxis, b3Vec3 upAxis, float area, float aspectRatio );
+
+/// Create a flat plate airfoil profile.
+/// @param chordAxis direction from trailing edge to leading edge in local shape space
+/// @param upAxis direction perpendicular to chord in lift direction in local shape space
+/// @param area planform area in m^2 (or <= 0 for auto-computation from shape bounds)
+/// @param aspectRatio wing aspect ratio (span^2 / area, e.g. 4.0 to 8.0)
+/// @ingroup shape
+B3_API b3Airfoil b3MakeFlatPlateAirfoil( b3Vec3 chordAxis, b3Vec3 upAxis, float area, float aspectRatio );
+
+/// Create an airfoil definition that uses a separate proxy hull for aerodynamic forces.
+/// @param aeroHull convex hull used for aerodynamic simulation
+/// @ingroup shape
+B3_API b3Airfoil b3MakeProxyHullAirfoil( const b3HullData* aeroHull );
+
+/// Assign a custom airfoil profile and aerodynamic parameters to a shape.
+/// @param shapeId the shape id
+/// @param airfoil the airfoil definition to assign
+/// @ingroup shape
+B3_API void b3Shape_SetAirfoil( b3ShapeId shapeId, const b3Airfoil* airfoil );
+
+/// Get the custom airfoil profile and aerodynamic parameters assigned to a shape.
+/// @param shapeId the shape id
+/// @ingroup shape
+B3_API b3Airfoil b3Shape_GetAirfoil( b3ShapeId shapeId );
 
 /** @} */ // shape
 

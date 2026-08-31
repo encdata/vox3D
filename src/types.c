@@ -63,6 +63,84 @@ b3SurfaceMaterial b3DefaultSurfaceMaterial( void )
 	return surfaceMaterial;
 }
 
+b3Airfoil b3DefaultAirfoil( void )
+{
+	b3Airfoil airfoil = { 0 };
+	airfoil.type = b3_airfoilNone;
+	airfoil.chordAxis = ( b3Vec3 ){ 0.0f, 0.0f, -1.0f };
+	airfoil.upAxis = ( b3Vec3 ){ 0.0f, 1.0f, 0.0f };
+	airfoil.centerOfPressure = ( b3Vec3 ){ 0.0f, 0.0f, 0.0f };
+	airfoil.area = 0.0f;
+	airfoil.aspectRatio = 6.0f;
+	airfoil.liftSlope = 5.5f;
+	airfoil.zeroLiftAoA = 0.0f;
+	airfoil.stallAngle = 15.0f * B3_PI / 180.0f;
+	airfoil.maxCl = 1.3f;
+	airfoil.cd0 = 0.018f;
+	airfoil.efficiencyFactor = 0.85f;
+	airfoil.aeroHull = NULL;
+	return airfoil;
+}
+
+b3Airfoil b3MakeCamberedAirfoil( b3Vec3 chordAxis, b3Vec3 upAxis, float area, float aspectRatio )
+{
+	b3Airfoil airfoil = b3DefaultAirfoil();
+	airfoil.type = b3_airfoilCambered;
+	airfoil.chordAxis = b3Normalize( chordAxis );
+	airfoil.upAxis = b3Normalize( upAxis );
+	airfoil.area = area;
+	airfoil.aspectRatio = aspectRatio > 0.0f ? aspectRatio : 6.0f;
+	airfoil.liftSlope = 5.5f;
+	airfoil.zeroLiftAoA = -3.5f * B3_PI / 180.0f;
+	airfoil.stallAngle = 16.0f * B3_PI / 180.0f;
+	airfoil.maxCl = 1.5f;
+	airfoil.cd0 = 0.015f;
+	airfoil.efficiencyFactor = 0.90f;
+	return airfoil;
+}
+
+b3Airfoil b3MakeSymmetricAirfoil( b3Vec3 chordAxis, b3Vec3 upAxis, float area, float aspectRatio )
+{
+	b3Airfoil airfoil = b3DefaultAirfoil();
+	airfoil.type = b3_airfoilSymmetric;
+	airfoil.chordAxis = b3Normalize( chordAxis );
+	airfoil.upAxis = b3Normalize( upAxis );
+	airfoil.area = area;
+	airfoil.aspectRatio = aspectRatio > 0.0f ? aspectRatio : 6.0f;
+	airfoil.liftSlope = 5.5f;
+	airfoil.zeroLiftAoA = 0.0f;
+	airfoil.stallAngle = 14.0f * B3_PI / 180.0f;
+	airfoil.maxCl = 1.2f;
+	airfoil.cd0 = 0.015f;
+	airfoil.efficiencyFactor = 0.88f;
+	return airfoil;
+}
+
+b3Airfoil b3MakeFlatPlateAirfoil( b3Vec3 chordAxis, b3Vec3 upAxis, float area, float aspectRatio )
+{
+	b3Airfoil airfoil = b3DefaultAirfoil();
+	airfoil.type = b3_airfoilFlatPlate;
+	airfoil.chordAxis = b3Normalize( chordAxis );
+	airfoil.upAxis = b3Normalize( upAxis );
+	airfoil.area = area;
+	airfoil.aspectRatio = aspectRatio > 0.0f ? aspectRatio : 5.0f;
+	airfoil.liftSlope = 4.5f;
+	airfoil.zeroLiftAoA = 0.0f;
+	airfoil.stallAngle = 12.0f * B3_PI / 180.0f;
+	airfoil.maxCl = 1.0f;
+	airfoil.cd0 = 0.030f;
+	airfoil.efficiencyFactor = 0.80f;
+	return airfoil;
+}
+
+b3Airfoil b3MakeProxyHullAirfoil( const b3HullData* aeroHull )
+{
+	b3Airfoil airfoil = b3DefaultAirfoil();
+	airfoil.type = b3_airfoilNone;
+	airfoil.aeroHull = aeroHull;
+	return airfoil;
+}
+
 b3ShapeDef b3DefaultShapeDef( void )
 {
 	float lengthUnits = b3GetLengthUnitsPerMeter();
@@ -76,6 +154,8 @@ b3ShapeDef b3DefaultShapeDef( void )
 	def.updateBodyMass = true;
 	def.invokeContactCreation = true;
 	def.enableSpeculativeContact = true;
+	def.enableLift = false;
+	def.airfoil = b3DefaultAirfoil();
 	def.internalValue = B3_SECRET_COOKIE;
 	return def;
 }

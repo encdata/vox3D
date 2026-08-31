@@ -319,7 +319,7 @@ _Static_assert( sizeof( void* ) != 8 || sizeof( b3ExplosionDef ) == 32 || sizeof
 				"b3ExplosionDef changed: update b3RecW_EXPLOSIONDEF and b3RecR_EXPLOSIONDEF together" );
 _Static_assert( sizeof( void* ) != 8 || sizeof( b3BodyDef ) == 104 || sizeof( b3BodyDef ) == 120,
 				"b3BodyDef changed: update b3RecW_BODYDEF and b3RecR_BODYDEF together" );
-_Static_assert( sizeof( void* ) != 8 || sizeof( b3ShapeDef ) == 120,
+_Static_assert( sizeof( void* ) != 8 || sizeof( b3ShapeDef ) == 200 || sizeof( b3ShapeDef ) == 208 || sizeof( b3ShapeDef ) == 216,
 				"b3ShapeDef changed: update b3RecW_SHAPEDEF and b3RecR_SHAPEDEF together" );
 _Static_assert( sizeof( void* ) != 8 || sizeof( b3ParallelJointDef ) == 128,
 				"b3ParallelJointDef changed: update b3RecW_PARALLELJOINTDEF and its reader together" );
@@ -373,6 +373,23 @@ void b3RecW_BODYDEF( b3RecBuffer* buf, b3BodyDef v )
 	// internalValue omitted
 }
 
+void b3RecW_AIRFOIL( b3RecBuffer* buf, b3Airfoil v )
+{
+	b3RecW_I32( buf, (int32_t)v.type );
+	b3RecW_VEC3( buf, v.chordAxis );
+	b3RecW_VEC3( buf, v.upAxis );
+	b3RecW_VEC3( buf, v.centerOfPressure );
+	b3RecW_F32( buf, v.area );
+	b3RecW_F32( buf, v.aspectRatio );
+	b3RecW_F32( buf, v.liftSlope );
+	b3RecW_F32( buf, v.zeroLiftAoA );
+	b3RecW_F32( buf, v.stallAngle );
+	b3RecW_F32( buf, v.maxCl );
+	b3RecW_F32( buf, v.cd0 );
+	b3RecW_F32( buf, v.efficiencyFactor );
+	b3RecW_U64( buf, 0u ); // aeroHull pointer not preserved
+}
+
 void b3RecW_SHAPEDEF( b3RecBuffer* buf, b3ShapeDef v )
 {
 	b3RecW_STR( buf, v.name );
@@ -400,6 +417,8 @@ void b3RecW_SHAPEDEF( b3RecBuffer* buf, b3ShapeDef v )
 	b3RecW_BOOL( buf, v.invokeContactCreation );
 	b3RecW_BOOL( buf, v.updateBodyMass );
 	b3RecW_BOOL( buf, v.enableSpeculativeContact );
+	b3RecW_BOOL( buf, v.enableLift );
+	b3RecW_AIRFOIL( buf, v.airfoil );
 	// internalValue omitted
 }
 

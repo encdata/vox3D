@@ -11,6 +11,9 @@
 
 typedef struct b3BroadPhase b3BroadPhase;
 typedef struct b3World b3World;
+typedef struct b3Body b3Body;
+typedef struct b3BodySim b3BodySim;
+typedef struct b3BodyState b3BodyState;
 
 typedef enum b3ShapeFlags
 {
@@ -21,6 +24,7 @@ typedef enum b3ShapeFlags
 	b3_enablePreSolveEvents = 0x10,
 	b3_enlargedAABB = 0x20,
 	b3_enableSpeculative = 0x40,
+	b3_enableLift = 0x80,
 } b3ShapeFlags;
 
 typedef struct b3Shape
@@ -53,6 +57,8 @@ typedef struct b3Shape
 
 	// b3ShapeFlags
 	uint8_t flags;
+
+	b3Airfoil airfoil;
 
 	union
 	{
@@ -104,6 +110,9 @@ b3AABB b3ComputeProxyAABB( const b3ShapeProxy* proxy );
 b3CastOutput b3RayCastShape( const b3Shape* shape, b3Transform transform, const b3RayCastInput* input );
 b3CastOutput b3ShapeCastShape( const b3Shape* shape, b3Transform transform, const b3ShapeCastInput* input );
 bool b3OverlapShape( const b3Shape* shape, b3Transform transform, const b3ShapeProxy* proxy );
+
+void b3ApplyShapeAerodynamics( b3World* world, b3Shape* shape, b3Body* body, b3BodySim* sim, b3BodyState* state,
+							   b3Vec3 wind, float drag, float lift, float maxSpeed );
 
 float b3GetShapeArea( const b3Shape* shape );
 float b3GetShapeProjectedArea( const b3Shape* shape, b3Vec3 planeNormal );

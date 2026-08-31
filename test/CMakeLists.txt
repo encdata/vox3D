@@ -17,6 +17,7 @@ set(BOX3D_TEST_FILES
     test_id.c
     test_joint.c
     test_large_world.c
+    test_lift.c
     test_macros.h
     test_manifold.c
     test_math.c

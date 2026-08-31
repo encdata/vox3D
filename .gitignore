@@ -12,6 +12,8 @@ CMakeUserPresets.json
 .tmp/
 .fetchcontent-cache/
 *.b3rec
+*.dat
+*.csv
 Superluminal/
 fracturing engine/
 /KrunchX

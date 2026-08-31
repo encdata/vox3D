@@ -321,6 +321,7 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->activeTaskCount = 0;
 	world->taskCount = 0;
 	world->gravity = def->gravity;
+	world->wind = def->wind;
 	world->hitEventThreshold = def->hitEventThreshold;
 	world->restitutionThreshold = def->restitutionThreshold;
 	world->maxLinearSpeed = def->maximumLinearSpeed;
@@ -1091,6 +1092,45 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 		uint64_t pairTicks = b3GetTicks();
 		b3UpdateBroadPhasePairs( world );
 		world->profile.pairs = b3GetMilliseconds( pairTicks );
+	}
+
+	// Wake sleeping sets containing aerodynamic shapes when world wind is active
+	if ( b3LengthSquared( world->wind ) > 1e-4f )
+	{
+		int setCount = world->solverSets.count;
+		for ( int i = b3_firstSleepingSet; i < setCount; ++i )
+		{
+			b3SolverSet* set = b3Array_Get( world->solverSets, i );
+			if ( set->bodySims.count > 0 )
+			{
+				bool hasLiftShape = false;
+				for ( int j = 0; j < set->bodySims.count; ++j )
+				{
+					b3BodySim* sim = set->bodySims.data + j;
+					b3Body* body = world->bodies.data + sim->bodyId;
+					int shapeId = body->headShapeId;
+					while ( shapeId != B3_NULL_INDEX )
+					{
+						b3Shape* shape = world->shapes.data + shapeId;
+						if ( shape->flags & b3_enableLift )
+						{
+							hasLiftShape = true;
+							break;
+						}
+						shapeId = shape->nextShapeId;
+					}
+					if ( hasLiftShape )
+					{
+						break;
+					}
+				}
+
+				if ( hasLiftShape )
+				{
+					b3WakeSolverSet( world, i );
+				}
+			}
+		}
 	}
 
 	b3SolverSet* awakeSet = b3Array_Get( world->solverSets, b3_awakeSet );
@@ -3345,6 +3385,18 @@ b3Vec3 b3World_GetGravity( b3WorldId worldId )
 {
 	b3World* world = b3GetWorldFromId( worldId );
 	return world->gravity;
+}
+
+void b3World_SetWind( b3WorldId worldId, b3Vec3 wind )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	world->wind = wind;
+}
+
+b3Vec3 b3World_GetWind( b3WorldId worldId )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	return world->wind;
 }
 
 typedef struct ExplosionContext

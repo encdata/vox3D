@@ -105,6 +105,7 @@ typedef struct b3TaskContext
 	int distanceIterations;
 	int pushBackIterations;
 	int rootIterations;
+	uint64_t aeroTicks;
 
 	// Number of contacts recycled this step (collide pass).
 	int recycledContactCount;
@@ -226,6 +227,7 @@ typedef struct b3World
 	int splitIslandId;
 
 	b3Vec3 gravity;
+	b3Vec3 wind;
 	float hitEventThreshold;
 	float restitutionThreshold;
 	float maxLinearSpeed;

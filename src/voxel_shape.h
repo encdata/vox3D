@@ -22,3 +22,7 @@ b3MassData b3Voxel_ComputeMass( const b3VoxelData* v, float density );
 b3CastOutput b3RayCastVoxel( const b3VoxelData* v, const b3RayCastInput* input );
 
 bool b3OverlapVoxel( const b3VoxelData* v, b3Transform xf, const b3ShapeProxy* proxy );
+
+void b3Voxel_ApplyAerodynamics( const b3VoxelData* v, b3Transform transform, b3Vec3 localCenterOfMass,
+								b3Vec3 linearVelocity, b3Vec3 angularVelocity, b3Vec3 wind, float drag,
+								float lift, float maxSpeed, float airDensity, b3Vec3* outForce, b3Vec3* outTorque );

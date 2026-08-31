@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 typedef struct b3VoxelData b3VoxelData;
+typedef struct b3HullData b3HullData;
 
 #define B3_DEFAULT_CATEGORY_BITS UINT64_MAX
 #define B3_DEFAULT_MASK_BITS UINT64_MAX
@@ -143,6 +144,9 @@ typedef struct b3WorldDef
 {
 	/// Gravity vector. Box3D has no up-vector defined.
 	b3Vec3 gravity;
+
+	/// Ambient wind velocity vector. Box3D applies this wind to shapes with lift/drag enabled.
+	b3Vec3 wind;
 
 	/// Restitution speed threshold, usually in m/s. Collisions above this
 	/// speed have restitution applied (will bounce).
@@ -455,6 +459,51 @@ typedef enum b3ShapeType
 	b3_shapeTypeCount
 } b3ShapeType;
 
+/// Pre-defined standard airfoil profile types or custom curves.
+/// @ingroup shape
+typedef enum b3AirfoilType
+{
+	b3_airfoilNone = 0,			///< Uses default geometric face-based aerodynamics
+	b3_airfoilFlatPlate = 1,	///< Symmetric flat plate / thin sheet
+	b3_airfoilSymmetric = 2,	///< Symmetric streamlined airfoil (e.g. NACA 0012)
+	b3_airfoilCambered = 3,		///< High-lift cambered airfoil (e.g. Clark-Y / NACA 2412)
+	b3_airfoilCustom = 4,		///< Custom lift/drag polar coefficients
+} b3AirfoilType;
+
+/// Configuration for shape-attached or body-attached airfoil aerodynamics.
+/// Allows any object (box, mesh, voxel, compound) to have an assigned aerodynamic profile
+/// completely independent of its collision and visual shape.
+/// @ingroup shape
+typedef struct b3Airfoil
+{
+	b3AirfoilType type;
+
+	b3Vec3 chordAxis;
+
+	b3Vec3 upAxis;
+
+	b3Vec3 centerOfPressure;
+
+	float area;
+
+	float aspectRatio;
+
+	float liftSlope;
+
+	float zeroLiftAoA;
+
+	float stallAngle;
+
+	float maxCl;
+
+	float cd0;
+
+	float efficiencyFactor;
+
+	const b3HullData* aeroHull;
+
+} b3Airfoil;
+
 /// Used to create a shape
 /// @ingroup shape
 typedef struct b3ShapeDef
@@ -520,6 +569,12 @@ typedef struct b3ShapeDef
 	/// Experimental: this can only disable speculative contact between hulls and triangles (meshes and height fields).
 	bool enableSpeculativeContact;
 
+	/// Enable shape-based aerodynamic lift and drag forces during simulation. False by default.
+	bool enableLift;
+
+	/// Custom airfoil aerodynamic profile and parameters for this shape.
+	b3Airfoil airfoil;
+
 	/// Used internally to detect a valid definition. DO NOT SET.
 	int internalValue;
 
@@ -557,6 +612,7 @@ typedef struct b3Profile
 	float bullets;
 	float sleepIslands;
 	float sensors;
+	float aerodynamics;
 	float fracture;
 	float fractureGather;
 	float fractureAnalyze;

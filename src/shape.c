@@ -194,6 +194,8 @@ static b3Shape* b3CreateShapeInternal( b3World* world, b3Body* body, b3WorldTran
 	shape->flags |= def->enableHitEvents ? b3_enableHitEvents : 0;
 	shape->flags |= def->enablePreSolveEvents ? b3_enablePreSolveEvents : 0;
 	shape->flags |= def->enableSpeculativeContact ? b3_enableSpeculative : 0;
+	shape->flags |= def->enableLift ? b3_enableLift : 0;
+	shape->airfoil = def->airfoil;
 	shape->proxyKey = B3_NULL_INDEX;
 	shape->localCentroid = b3GetShapeCentroid( shape );
 	shape->aabbMargin = b3ComputeShapeMargin( shape );
@@ -1526,7 +1528,45 @@ bool b3Shape_AreHitEventsEnabled( b3ShapeId shapeId )
 {
 	b3World* world = b3GetWorld( shapeId.world0 );
 	b3Shape* shape = b3GetShape( world, shapeId );
-	return shape->flags & b3_enableHitEvents;
+	return ( shape->flags & b3_enableHitEvents ) != 0;
+}
+
+void b3Shape_EnableLift( b3ShapeId shapeId, bool flag )
+{
+	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
+	if ( world == NULL )
+	{
+		return;
+	}
+
+	b3Shape* shape = b3GetShape( world, shapeId );
+	shape->flags = flag ? ( shape->flags | b3_enableLift ) : ( shape->flags & ~b3_enableLift );
+}
+
+bool b3Shape_IsLiftEnabled( b3ShapeId shapeId )
+{
+	b3World* world = b3GetWorld( shapeId.world0 );
+	b3Shape* shape = b3GetShape( world, shapeId );
+	return ( shape->flags & b3_enableLift ) != 0;
+}
+
+void b3Shape_SetAirfoil( b3ShapeId shapeId, const b3Airfoil* airfoil )
+{
+	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
+	if ( world == NULL || airfoil == NULL )
+	{
+		return;
+	}
+
+	b3Shape* shape = b3GetShape( world, shapeId );
+	shape->airfoil = *airfoil;
+}
+
+b3Airfoil b3Shape_GetAirfoil( b3ShapeId shapeId )
+{
+	b3World* world = b3GetWorld( shapeId.world0 );
+	b3Shape* shape = b3GetShape( world, shapeId );
+	return shape->airfoil;
 }
 
 b3ShapeType b3Shape_GetType( b3ShapeId shapeId )
@@ -1870,7 +1910,379 @@ b3Vec3 b3Shape_GetClosestPoint( b3ShapeId shapeId, b3Vec3 target )
 	return b3TransformPoint( transform, output.pointA );
 }
 
-#define B3_DEBUG_WIND 0
+static void b3ApplyHullAerodynamics( const b3HullData* hull, b3Transform transform, b3Vec3 localCenterOfMass,
+									 b3Vec3 linearVelocity, b3Vec3 angularVelocity, b3Vec3 wind, float drag,
+									 float lift, float maxSpeed, float airDensity, b3Vec3* outForce, b3Vec3* outTorque )
+{
+	b3Matrix3 matrix = b3MakeMatrixFromQuat( transform.q );
+	int faceCount = hull->faceCount;
+	const b3Vec3* points = b3GetHullPoints( hull );
+	const b3HullFace* faces = b3GetHullFaces( hull );
+	const b3HullHalfEdge* edges = b3GetHullEdges( hull );
+	const b3Plane* planes = b3GetHullPlanes( hull );
+
+	b3Vec3 force = *outForce;
+	b3Vec3 torque = *outTorque;
+
+	for ( int i = 0; i < faceCount; ++i )
+	{
+		const b3HullFace* face = faces + i;
+		const b3HullHalfEdge* edge1 = edges + face->edge;
+		const b3HullHalfEdge* edge2 = edges + edge1->next;
+		const b3HullHalfEdge* edge3 = edges + edge2->next;
+
+		B3_ASSERT( edge1 != edge3 );
+		B3_ASSERT( edge1->origin < hull->vertexCount );
+		B3_ASSERT( edge2->origin < hull->vertexCount );
+
+		b3Vec3 localPoint1 = points[edge1->origin];
+		b3Vec3 localPoint2 = points[edge2->origin];
+		b3Vec3 v1 = b3MulMV( matrix, localPoint1 );
+		b3Vec3 v2 = b3MulMV( matrix, localPoint2 );
+		b3Vec3 normal = b3MulMV( matrix, planes[i].normal );
+
+		do
+		{
+			B3_ASSERT( edge3->origin < hull->vertexCount );
+			b3Vec3 localPoint3 = points[edge3->origin];
+			b3Vec3 v3 = b3MulMV( matrix, localPoint3 );
+
+			// Triangle center
+			b3Vec3 localCenter = b3MulSV( 0.333333f, b3Add( localPoint1, b3Add( localPoint2, localPoint3 ) ) );
+
+			// Lever arm from center of mass to triangle center in world space
+			b3Vec3 lever = b3MulMV( matrix, b3Sub( localCenter, localCenterOfMass ) );
+
+			// Velocity of the triangle center in world space
+			b3Vec3 centerVelocity = b3Add( linearVelocity, b3Cross( angularVelocity, lever ) );
+
+			b3Vec3 relativeVelocity = b3Sub( wind, centerVelocity );
+			float speed;
+			b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
+			float cosTheta = -b3Dot( normal, direction );
+
+			// Check if face is exposed to airflow
+			if ( cosTheta > FLT_EPSILON )
+			{
+				float faceArea = 0.5f * b3Length( b3Cross( b3Sub( v2, v1 ), b3Sub( v3, v1 ) ) );
+				b3Vec3 liftDir = b3Sub( b3MulSV( -1.0f, normal ), b3MulSV( cosTheta, direction ) );
+				float liftDirLen = b3Length( liftDir );
+				if ( liftDirLen > FLT_EPSILON )
+				{
+					liftDir = b3MulSV( 1.0f / liftDirLen, liftDir );
+				}
+
+				speed = b3MinFloat( speed, maxSpeed );
+				float qA = 0.5f * airDensity * faceArea * speed * speed;
+
+				// Physical flat-plate / thin-airfoil aerodynamic coefficients
+				float sinTheta = liftDirLen;
+				float cl = 2.0f * cosTheta * sinTheta;
+				float cd = 1.28f * cosTheta * cosTheta + 0.02f;
+
+				b3Vec3 dragForce = b3MulSV( qA * drag * cd, direction );
+				b3Vec3 liftForce = b3MulSV( qA * lift * cl, liftDir );
+				b3Vec3 deltaForce = b3Add( dragForce, liftForce );
+				b3Vec3 deltaTorque = b3Cross( lever, deltaForce );
+
+				force = b3Add( force, deltaForce );
+				torque = b3Add( torque, deltaTorque );
+			}
+
+			edge2 = edge3;
+			edge3 = edges + edge3->next;
+			v2 = v3;
+			localPoint2 = localPoint3;
+		}
+		while ( edge1 != edge3 );
+	}
+
+	*outForce = force;
+	*outTorque = torque;
+}
+
+static void b3ApplyAirfoilPolar( const b3Airfoil* airfoil, const b3Shape* shape, b3Transform transform,
+								 b3Vec3 localCenterOfMass, b3Vec3 linearVelocity, b3Vec3 angularVelocity,
+								 b3Vec3 wind, float drag, float lift, float maxSpeed, float airDensity,
+								 b3Vec3* outForce, b3Vec3* outTorque )
+{
+	b3Vec3 localCoP = b3Add( shape->localCentroid, airfoil->centerOfPressure );
+	b3Vec3 lever = b3RotateVector( transform.q, b3Sub( localCoP, localCenterOfMass ) );
+	b3Vec3 pointVelocity = b3Add( linearVelocity, b3Cross( angularVelocity, lever ) );
+	b3Vec3 relativeVelocity = b3Sub( wind, pointVelocity );
+
+	float speed;
+	b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
+	if ( speed <= FLT_EPSILON )
+	{
+		return;
+	}
+
+	speed = b3MinFloat( speed, maxSpeed );
+	float q = 0.5f * airDensity * speed * speed;
+
+	b3Vec3 chord = b3Normalize( b3RotateVector( transform.q, airfoil->chordAxis ) );
+	b3Vec3 dorsalUp = b3Normalize( b3RotateVector( transform.q, airfoil->upAxis ) );
+	b3Vec3 span = b3Cross( chord, dorsalUp );
+	float spanLen = b3Length( span );
+	if ( spanLen > FLT_EPSILON )
+	{
+		span = b3MulSV( 1.0f / spanLen, span );
+		dorsalUp = b3Cross( span, chord );
+	}
+	else
+	{
+		span = b3Vec3_axisX;
+		dorsalUp = b3Vec3_axisY;
+	}
+
+	// Oncoming air relative velocity projected into the chord-up plane
+	// If body flies forward (+chord into air), relative velocity is directed along -chord, so -uChord > 0
+	float uChord = b3Dot( direction, chord );
+	float uUp = b3Dot( direction, dorsalUp );
+	float alpha = b3Atan2( uUp, -uChord );
+
+	float area = airfoil->area;
+	if ( area <= 0.0f )
+	{
+		area = 0.5f * b3GetShapeArea( shape );
+		if ( area <= 0.0f )
+		{
+			area = 1.0f;
+		}
+	}
+
+	float ar = airfoil->aspectRatio > 0.0f ? airfoil->aspectRatio : 6.0f;
+	float e = airfoil->efficiencyFactor > 0.0f ? airfoil->efficiencyFactor : 0.85f;
+	float liftSlope = airfoil->liftSlope > 0.0f ? airfoil->liftSlope : 5.5f;
+	float zeroAoA = airfoil->zeroLiftAoA;
+	float stallAoA = airfoil->stallAngle > 0.0f ? airfoil->stallAngle : ( 15.0f * B3_PI / 180.0f );
+	float maxCl = airfoil->maxCl > 0.0f ? airfoil->maxCl : 1.4f;
+	float cd0 = airfoil->cd0 > 0.0f ? airfoil->cd0 : 0.015f;
+
+	// Lift coefficient Cl(alpha)
+	float deltaAlpha = alpha - zeroAoA;
+	float cl = 0.0f;
+	if ( fabsf( deltaAlpha ) <= stallAoA )
+	{
+		cl = liftSlope * deltaAlpha;
+		cl = b3ClampFloat( cl, -maxCl, maxCl );
+	}
+	else
+	{
+		float stallSign = deltaAlpha > 0.0f ? 1.0f : -1.0f;
+		float stallCl = stallSign * maxCl;
+		float postStallFactor = cosf( ( fabsf( deltaAlpha ) - stallAoA ) * 0.5f );
+		cl = stallCl * postStallFactor * sinf( 2.0f * alpha );
+	}
+
+	// Drag coefficient Cd(alpha)
+	float cdi = ( cl * cl ) / ( B3_PI * e * ar );
+	float sinA = sinf( alpha );
+	float cdp = ( 1.2f - cd0 ) * sinA * sinA;
+	float cd = cd0 + cdi + cdp;
+
+	// Lift direction in chord-up plane perpendicular to oncoming wind
+	b3Vec3 liftDirection = b3Cross( direction, span );
+	float liftDirLen = b3Length( liftDirection );
+	if ( liftDirLen > FLT_EPSILON )
+	{
+		liftDirection = b3MulSV( 1.0f / liftDirLen, liftDirection );
+	}
+	else
+	{
+		liftDirection = dorsalUp;
+	}
+
+	b3Vec3 dragForce = b3MulSV( q * area * cd * drag, direction );
+	b3Vec3 liftForce = b3MulSV( q * area * cl * lift, liftDirection );
+	b3Vec3 deltaForce = b3Add( dragForce, liftForce );
+	b3Vec3 deltaTorque = b3Cross( lever, deltaForce );
+
+	*outForce = b3Add( *outForce, deltaForce );
+	*outTorque = b3Add( *outTorque, deltaTorque );
+}
+
+void b3ApplyShapeAerodynamics( b3World* world, b3Shape* shape, b3Body* body, b3BodySim* sim, b3BodyState* state,
+							   b3Vec3 wind, float drag, float lift, float maxSpeed )
+{
+	B3_UNUSED( world );
+	B3_UNUSED( body );
+	if ( sim->invMass == 0.0f )
+	{
+		return;
+	}
+
+	b3Transform transform = b3ToRelativeTransform( sim->transform, b3Pos_zero );
+
+	float lengthUnits = b3GetLengthUnitsPerMeter();
+	float volumeUnits = lengthUnits * lengthUnits * lengthUnits;
+	float airDensity = 1.2250f / ( volumeUnits );
+
+	b3Vec3 force = { 0 };
+	b3Vec3 torque = { 0 };
+
+	// 1. Analytical airfoil polar model
+	if ( shape->airfoil.type != b3_airfoilNone )
+	{
+		b3ApplyAirfoilPolar( &shape->airfoil, shape, transform, sim->localCenter, state->linearVelocity,
+							 state->angularVelocity, wind, drag, lift, maxSpeed, airDensity, &force, &torque );
+	}
+	// 2. Proxy aerodynamic hull
+	else if ( shape->airfoil.aeroHull != NULL )
+	{
+		b3ApplyHullAerodynamics( shape->airfoil.aeroHull, transform, sim->localCenter, state->linearVelocity,
+								 state->angularVelocity, wind, drag, lift, maxSpeed, airDensity, &force, &torque );
+	}
+	// 3. Shape geometric face-based aerodynamics
+	else
+	{
+		switch ( shape->type )
+		{
+			case b3_sphereShape:
+			{
+				float radius = shape->sphere.radius;
+				b3Vec3 centroid = shape->localCentroid;
+				b3Vec3 lever = b3RotateVector( transform.q, b3Sub( centroid, sim->localCenter ) );
+				b3Vec3 shapeVelocity = b3Add( state->linearVelocity, b3Cross( state->angularVelocity, lever ) );
+				b3Vec3 relativeVelocity = b3Sub( wind, shapeVelocity );
+				float speed;
+				b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
+				speed = b3MinFloat( speed, maxSpeed );
+				float projectedArea = B3_PI * radius * radius;
+				float forceMagnitude = 0.5f * airDensity * projectedArea * speed * speed;
+				force = b3MulSV( forceMagnitude * ( 0.47f * drag ), direction );
+				torque = b3Cross( lever, force );
+			}
+			break;
+
+			case b3_capsuleShape:
+			{
+				b3Vec3 centroid = shape->localCentroid;
+				b3Vec3 lever = b3RotateVector( transform.q, b3Sub( centroid, sim->localCenter ) );
+				b3Vec3 shapeVelocity = b3Add( state->linearVelocity, b3Cross( state->angularVelocity, lever ) );
+				b3Vec3 relativeVelocity = b3Sub( wind, shapeVelocity );
+				float speed;
+				b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
+				speed = b3MinFloat( speed, maxSpeed );
+
+				b3Vec3 d = b3Sub( shape->capsule.center2, shape->capsule.center1 );
+				float length = b3Length( d );
+				d = b3RotateVector( transform.q, d );
+				b3Vec3 axis = length > FLT_EPSILON ? b3MulSV( 1.0f / length, d ) : b3Vec3_axisY;
+
+				float cosAlpha = b3Dot( axis, direction );
+				float sinAlpha2 = b3MaxFloat( 0.0f, 1.0f - cosAlpha * cosAlpha );
+				float sinAlpha = sqrtf( sinAlpha2 );
+
+				float radius = shape->capsule.radius;
+				float projectedArea = B3_PI * radius * radius + 2.0f * radius * length * sinAlpha;
+
+				b3Vec3 normal = b3Sub( b3MulSV( cosAlpha, axis ), direction );
+				b3Vec3 liftDirection = b3Cross( b3Cross( normal, direction ), direction );
+
+				float q = 0.5f * airDensity * speed * speed;
+				float Cd = ( 0.08f * cosAlpha * cosAlpha + 1.0f * sinAlpha2 + 0.02f ) * drag;
+				float Cl = ( 2.0f * fabsf( cosAlpha ) * sinAlpha ) * lift;
+
+				b3Vec3 dragForce = b3MulSV( q * projectedArea * Cd, direction );
+				b3Vec3 liftForce = b3MulSV( q * projectedArea * Cl, liftDirection );
+				force = b3Add( dragForce, liftForce );
+				torque = b3Cross( lever, force );
+			}
+			break;
+
+			case b3_hullShape:
+			{
+				b3ApplyHullAerodynamics( shape->hull, transform, sim->localCenter, state->linearVelocity,
+										 state->angularVelocity, wind, drag, lift, maxSpeed, airDensity, &force, &torque );
+			}
+			break;
+
+			case b3_voxelShape:
+			{
+				b3Voxel_ApplyAerodynamics( shape->voxel, transform, sim->localCenter, state->linearVelocity,
+										   state->angularVelocity, wind, drag, lift, maxSpeed, airDensity, &force, &torque );
+			}
+			break;
+
+			case b3_meshShape:
+			{
+				const b3MeshData* meshData = shape->mesh.data;
+				if ( meshData == NULL || meshData->triangleCount == 0 )
+				{
+					break;
+				}
+				b3Matrix3 matrix = b3MakeMatrixFromQuat( transform.q );
+				b3Vec3 linearVelocity = state->linearVelocity;
+				b3Vec3 angularVelocity = state->angularVelocity;
+				b3Vec3 localCenterOfMass = sim->localCenter;
+
+				int triCount = meshData->triangleCount;
+				for ( int i = 0; i < triCount; ++i )
+				{
+					b3Triangle tri = b3GetMeshTriangle( &shape->mesh, i );
+					b3Vec3 p1 = tri.vertices[0];
+					b3Vec3 p2 = tri.vertices[1];
+					b3Vec3 p3 = tri.vertices[2];
+
+					b3Vec3 v1 = b3MulMV( matrix, p1 );
+					b3Vec3 v2 = b3MulMV( matrix, p2 );
+					b3Vec3 v3 = b3MulMV( matrix, p3 );
+
+					b3Vec3 crossProd = b3Cross( b3Sub( v2, v1 ), b3Sub( v3, v1 ) );
+					float area2 = b3Length( crossProd );
+					if ( area2 < FLT_EPSILON )
+					{
+						continue;
+					}
+					float faceArea = 0.5f * area2;
+					b3Vec3 normal = b3MulSV( 1.0f / area2, crossProd );
+
+					b3Vec3 localCenter = b3MulSV( 0.333333f, b3Add( p1, b3Add( p2, p3 ) ) );
+					b3Vec3 lever = b3MulMV( matrix, b3Sub( localCenter, localCenterOfMass ) );
+					b3Vec3 centerVelocity = b3Add( linearVelocity, b3Cross( angularVelocity, lever ) );
+					b3Vec3 relativeVelocity = b3Sub( wind, centerVelocity );
+
+					float speed;
+					b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
+					float cosTheta = -b3Dot( normal, direction );
+
+					if ( cosTheta > FLT_EPSILON )
+					{
+						b3Vec3 liftDir = b3Sub( b3MulSV( -1.0f, normal ), b3MulSV( cosTheta, direction ) );
+						float liftDirLen = b3Length( liftDir );
+						if ( liftDirLen > FLT_EPSILON )
+						{
+							liftDir = b3MulSV( 1.0f / liftDirLen, liftDir );
+						}
+
+						speed = b3MinFloat( speed, maxSpeed );
+						float qA = 0.5f * airDensity * faceArea * speed * speed;
+
+						float sinTheta = liftDirLen;
+						float cl = 2.0f * cosTheta * sinTheta;
+						float cd = 1.28f * cosTheta * cosTheta + 0.02f;
+
+						b3Vec3 dragForce = b3MulSV( qA * drag * cd, direction );
+						b3Vec3 liftForce = b3MulSV( qA * lift * cl, liftDir );
+						b3Vec3 deltaForce = b3Add( dragForce, liftForce );
+						b3Vec3 deltaTorque = b3Cross( lever, deltaForce );
+						force = b3Add( force, deltaForce );
+						torque = b3Add( torque, deltaTorque );
+					}
+				}
+			}
+			break;
+
+			default:
+				break;
+		}
+	}
+
+	sim->force = b3Add( sim->force, force );
+	sim->torque = b3Add( sim->torque, torque );
+}
 
 // https://en.wikipedia.org/wiki/Density_of_air
 // https://www.engineeringtoolbox.com/wind-load-d_1775.html
@@ -1887,13 +2299,6 @@ void b3Shape_ApplyWind( b3ShapeId shapeId, b3Vec3 wind, float drag, float lift, 
 	B3_REC( world, ShapeApplyWind, shapeId, wind, drag, lift, maxSpeed, wake );
 
 	b3Shape* shape = b3GetShape( world, shapeId );
-
-	b3ShapeType shapeType = shape->type;
-	if ( shapeType != b3_sphereShape && shapeType != b3_capsuleShape && shapeType != b3_hullShape )
-	{
-		return;
-	}
-
 	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
 
 	if ( body->type != b3_dynamicBody )
@@ -1922,163 +2327,7 @@ void b3Shape_ApplyWind( b3ShapeId shapeId, b3Vec3 wind, float drag, float lift, 
 	B3_ASSERT( body->setIndex == b3_awakeSet );
 
 	b3BodyState* state = b3GetBodyState( world, body );
-	// Only the rotation is used below, so the demoted world transform is exact
-	b3Transform transform = b3ToRelativeTransform( sim->transform, b3Pos_zero );
-
-	float lengthUnits = b3GetLengthUnitsPerMeter();
-	float volumeUnits = lengthUnits * lengthUnits * lengthUnits;
-
-	float airDensity = 1.2250f / ( volumeUnits );
-
-	b3Vec3 force = { 0 };
-	b3Vec3 torque = { 0 };
-
-	switch ( shape->type )
-	{
-		case b3_sphereShape:
-		{
-			float radius = shape->sphere.radius;
-			b3Vec3 centroid = shape->localCentroid;
-			b3Vec3 lever = b3RotateVector( transform.q, b3Sub( centroid, sim->localCenter ) );
-			b3Vec3 shapeVelocity = b3Add( state->linearVelocity, b3Cross( state->angularVelocity, lever ) );
-			b3Vec3 relativeVelocity = b3MulSub( wind, drag, shapeVelocity );
-			float speed;
-			b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
-			speed = b3MinFloat( speed, maxSpeed );
-			float projectedArea = B3_PI * radius * radius;
-			force = b3MulSV( 0.5f * airDensity * projectedArea * speed * speed, direction );
-			torque = b3Cross( lever, force );
-		}
-		break;
-
-		case b3_capsuleShape:
-		{
-			b3Vec3 centroid = shape->localCentroid;
-			b3Vec3 lever = b3RotateVector( transform.q, b3Sub( centroid, sim->localCenter ) );
-			b3Vec3 shapeVelocity = b3Add( state->linearVelocity, b3Cross( state->angularVelocity, lever ) );
-			b3Vec3 relativeVelocity = b3MulSub( wind, drag, shapeVelocity );
-			float speed;
-			b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
-			speed = b3MinFloat( speed, maxSpeed );
-
-			b3Vec3 d = b3Sub( shape->capsule.center2, shape->capsule.center1 );
-			d = b3RotateVector( transform.q, d );
-
-			float radius = shape->capsule.radius;
-			float projectedArea = B3_PI * radius * radius + 2.0f * radius * b3Length( b3Cross( d, direction ) );
-
-			// Normal that opposes the wind
-			b3Vec3 e = b3Normalize( d );
-			b3Vec3 normal = b3Sub( b3MulSV( b3Dot( direction, e ), e ), direction );
-
-			// portion of wind that is perpendicular to surface
-			b3Vec3 liftDirection = b3Cross( b3Cross( normal, direction ), direction );
-
-			float forceMagnitude = 0.5f * airDensity * projectedArea * speed * speed;
-			force = b3MulSV( forceMagnitude, b3MulAdd( direction, lift, liftDirection ) );
-
-			b3Vec3 edgeLever = b3MulAdd( lever, radius, normal );
-			torque = b3Cross( edgeLever, force );
-		}
-		break;
-
-		case b3_hullShape:
-		{
-			b3Matrix3 matrix = b3MakeMatrixFromQuat( transform.q );
-
-			int faceCount = shape->hull->faceCount;
-			const b3Vec3* points = b3GetHullPoints( shape->hull );
-			const b3HullFace* faces = b3GetHullFaces( shape->hull );
-			const b3HullHalfEdge* edges = b3GetHullEdges( shape->hull );
-			const b3Plane* planes = b3GetHullPlanes( shape->hull );
-
-			b3Vec3 linearVelocity = state->linearVelocity;
-			b3Vec3 angularVelocity = state->angularVelocity;
-			b3Vec3 localCenterOfMass = sim->localCenter;
-
-			for ( int i = 0; i < faceCount; ++i )
-			{
-				const b3HullFace* face = faces + i;
-				const b3HullHalfEdge* edge1 = edges + face->edge;
-				const b3HullHalfEdge* edge2 = edges + edge1->next;
-				const b3HullHalfEdge* edge3 = edges + edge2->next;
-
-				B3_ASSERT( edge1 != edge3 );
-				B3_ASSERT( edge1->origin < shape->hull->vertexCount );
-				B3_ASSERT( edge2->origin < shape->hull->vertexCount );
-
-				b3Vec3 localPoint1 = points[edge1->origin];
-				b3Vec3 localPoint2 = points[edge2->origin];
-				b3Vec3 v1 = b3MulMV( matrix, localPoint1 );
-				b3Vec3 v2 = b3MulMV( matrix, localPoint2 );
-				b3Vec3 normal = b3MulMV( matrix, planes[i].normal );
-
-				do
-				{
-					B3_ASSERT( edge3->origin < shape->hull->vertexCount );
-					b3Vec3 localPoint3 = points[edge3->origin];
-					b3Vec3 v3 = b3MulMV( matrix, localPoint3 );
-
-					// Triangle center
-					b3Vec3 localCenter = b3MulSV( 0.333333f, b3Add( localPoint1, b3Add( localPoint2, localPoint3 ) ) );
-
-					// Lever arm from center of mass to triangle center in world space
-					b3Vec3 lever = b3MulMV( matrix, b3Sub( localCenter, localCenterOfMass ) );
-
-					// Velocity of the triangle center in world space
-					b3Vec3 centerVelocity = b3Add( linearVelocity, b3Cross( angularVelocity, lever ) );
-
-					b3Vec3 relativeVelocity = b3MulSub( wind, drag, centerVelocity );
-					float speed;
-					b3Vec3 direction = b3GetLengthAndNormalize( &speed, relativeVelocity );
-
-					// Check for back-side
-					if ( b3Dot( normal, direction ) < -FLT_EPSILON )
-					{
-						float projectedArea = -0.5f * b3Dot( b3Cross( b3Sub( v2, v1 ), b3Sub( v3, v1 ) ), direction );
-						B3_VALIDATE( projectedArea >= -FLT_EPSILON );
-
-						b3Vec3 liftDirection = b3Cross( b3Cross( normal, direction ), direction );
-
-						speed = b3MinFloat( speed, maxSpeed );
-
-						float forceMagnitude = 0.5f * airDensity * projectedArea * speed * speed;
-						b3Vec3 deltaForce = b3MulSV( forceMagnitude, b3MulAdd( direction, lift, liftDirection ) );
-						b3Vec3 deltaTorque = b3Cross( lever, deltaForce );
-
-						force = b3Add( force, deltaForce );
-						torque = b3Add( torque, deltaTorque );
-
-#if B3_DEBUG_WIND
-						int lineIndex = world->taskContexts.data[0].lineCount;
-						if ( lineIndex < B3_DEBUG_LINE_CAPACITY )
-						{
-							b3DebugLine* line = world->taskContexts.data[0].lines + lineIndex;
-							line->p1 = b3OffsetPos( sim->transform.p, b3MulMV( matrix, localCenter ) );
-							line->p2 = b3OffsetPos( line->p1, deltaForce );
-							line->label = i;
-							line->color = b3_colorBlanchedAlmond;
-							world->taskContexts.data[0].lineCount += 1;
-						}
-#endif
-					}
-
-					edge2 = edge3;
-					edge3 = edges + edge3->next;
-					v2 = v3;
-					localPoint2 = localPoint3;
-				}
-				while ( edge1 != edge3 );
-			}
-		}
-		break;
-
-		default:
-			break;
-	}
-
-	sim->force = b3Add( sim->force, force );
-	sim->torque = b3Add( sim->torque, torque );
+	b3ApplyShapeAerodynamics( world, shape, body, sim, state, wind, drag, lift, maxSpeed );
 }
 
 typedef struct b3MeshImpactContext
